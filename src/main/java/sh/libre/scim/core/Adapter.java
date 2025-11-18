@@ -12,7 +12,15 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleMapperModel;
-import org.keycloak.models.utils.MultivaluedHashMap;
+import org.keycloak.common.util.MultivaluedHashMap;
+import sh.libre.scim.jpa.ScimResource;
+import de.captaingoldfish.scim.sdk.common.resources.ResourceNode;
+import java.util.regex.Pattern;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.stream.Stream;
 import java.util.regex.Pattern;
 import java.util.List;
 import java.util.ArrayList;
@@ -166,12 +174,8 @@ public abstract class Adapter<M extends RoleMapperModel, S extends ResourceNode>
         return filteredGroups.stream();
     }
 
-    private MultivaluedHashMap<String, String> getModel() {
-        var component = this.session.getContext().getRealm().getComponent(this.componentId);
-        if (component != null) {
-            return component.getConfig();
-        }
-        return null;
+    public Boolean skipRefresh() {
+        return skip;
     }
 
     private void addGroupRecursively(Set<org.keycloak.models.GroupModel> groups, org.keycloak.models.GroupModel group) {
