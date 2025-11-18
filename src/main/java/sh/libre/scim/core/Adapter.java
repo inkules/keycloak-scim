@@ -12,10 +12,11 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleMapperModel;
-import sh.libre.scim.jpa.ScimResource;
-import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
-import de.captaingoldfish.scim.sdk.client.builder.PatchBuilder;
-import de.captaingoldfish.scim.sdk.common.resources.ResourceNode;
+import java.util.regex.Pattern;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Set;
+import java.util.HashSet;
 
 public abstract class Adapter<M extends RoleMapperModel, S extends ResourceNode> {
 
@@ -141,5 +142,31 @@ public abstract class Adapter<M extends RoleMapperModel, S extends ResourceNode>
 
     public abstract Stream<M> getResourceStream();
 
-    public abstract Boolean skipRefresh();
-}
+    protected Stream<org.keycloak.models.GroupModel> getFilteredGroups() {
+        var model = getModel();
+        if (model == null) {
+            return this.session.groups().getGroupsStream(this.session.getContext().getRealm());
+        }
+        var filter = model.get("group-filter");
+        if (filter == null || filter.trim().isEmpty()) {
+            return this.session.groups().getGroupsStream(this.session.getContext().getRealm());
+        }
+        var patternStrings = filter.split(",");
+        List<Pattern> patterns = new ArrayList<>();
+        for (var p : patternStrings) {
+            patterns.add(Pattern.compile(p.trim()));
+        }
+        Set<org.keycloak.models.GroupModel> filteredGroups = new HashSet<>();
+        this.session.groups().getGroupsStream(this.session.getContext().getRealm())
+            .filter(g -> patterns.stream().anyMatch(p -> p.matcher(g.getName()).matches()))
+            .forEach(g -> {
+                addGroupRecursively(filteredGroups, g);
+            });
+        return filteredGroups.stream();
+    }
+
+    private void addGroupRecursively(Set<org.keycloak.models.GroupModel> groups, org.keycloak.models.GroupModel group) {
+        if (groups.add(group)) {
+            group.getSubGroupsStream().forEach(sub -> addGroupRecursively(groups, sub));
+        }
+    }

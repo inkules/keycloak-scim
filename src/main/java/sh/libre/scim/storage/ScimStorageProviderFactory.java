@@ -112,6 +112,12 @@ public class ScimStorageProviderFactory
                 .helpText("Only used when endpoint doesn't support putUser API operation (full replace)")
                 .defaultValue(false)
                 .add()
+                .property()
+                .name("group-filter")
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("Group filter patterns")
+                .helpText("Comma-separated regex patterns for group names to sync (e.g., 'admin.*,.*test'). Leave empty to sync all groups.")
+                .add()
                 .build();
     }
 

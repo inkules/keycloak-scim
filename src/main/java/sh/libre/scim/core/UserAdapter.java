@@ -6,7 +6,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Stream;
+import java.util.stream.Collectors;
 
 import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
 import de.captaingoldfish.scim.sdk.client.builder.PatchBuilder;
@@ -238,7 +238,15 @@ public class UserAdapter extends Adapter<UserModel, User> {
 
     @Override
     public Stream<UserModel> getResourceStream() {
-        return this.session.users().searchForUserStream(this.session.getContext().getRealm(), Map.of(UserModel.ENABLED, "true"));
+        var filteredGroups = getFilteredGroups().collect(Collectors.toSet());
+        if (filteredGroups.isEmpty()) {
+            return this.session.users().searchForUserStream(this.session.getContext().getRealm(), Map.of(UserModel.ENABLED, "true"));
+        }
+        Set<UserModel> users = new HashSet<>();
+        for (var group : filteredGroups) {
+            session.users().getGroupMembersStream(realm, group).forEach(users::add);
+        }
+        return users.stream().filter(u -> u.isEnabled());
     }
 
     @Override

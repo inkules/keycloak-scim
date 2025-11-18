@@ -132,6 +132,7 @@ public class ScimClient {
         if (adapter.query("findById", adapter.getId()).getResultList().size() != 0) {
             return;
         }
+        LOGGER.debugf("Creating SCIM resource for %s", adapter.getId());
         var retry = registry.retry("create-" + adapter.getId());
 
         ServerResponse<S> response = retry.executeSupplier(() -> {
@@ -165,6 +166,7 @@ public class ScimClient {
             var resource = adapter.query("findById", adapter.getId()).getSingleResult();
             adapter.apply(resource);
             String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
+            LOGGER.debugf("Replacing SCIM resource for %s at %s", adapter.getId(), url);
             var retry = registry.retry("replace-" + adapter.getId());
             ServerResponse<S> response = retry.executeSupplier(() -> {
                 try {
@@ -199,6 +201,7 @@ public class ScimClient {
             String id) {
         var adapter = getAdapter(aClass);
         adapter.setId(id);
+        LOGGER.debugf("Deleting SCIM resource for %s", id);
 
         try {
             var resource = adapter.query("findById", adapter.getId()).getSingleResult();
@@ -232,6 +235,7 @@ public class ScimClient {
             Class<A> aClass,
             SynchronizationResult syncRes) {
         LOGGER.info("Refresh resources");
+        LOGGER.debugf("Refreshing resources for %s", aClass.getSimpleName());
         getAdapter(aClass).getResourceStream().forEach(resource -> {
             var adapter = getAdapter(aClass);
             adapter.apply(resource);
@@ -254,6 +258,7 @@ public class ScimClient {
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void importResources(
             Class<A> aClass, SynchronizationResult syncRes) {
         LOGGER.info("Import");
+        LOGGER.debugf("Importing resources for %s", aClass.getSimpleName());
         try {
             var adapter = getAdapter(aClass);
             ServerResponse<ListResponse<S>> response  = scimRequestBuilder.list("url", adapter.getResourceClass()).get().sendRequest();
@@ -317,12 +322,14 @@ public class ScimClient {
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void sync(Class<A> aClass,
             SynchronizationResult syncRes) {
+        LOGGER.debugf("Starting sync for %s", aClass.getSimpleName());
         if (this.model.get("sync-import", false)) {
             this.importResources(aClass, syncRes);
         }
         if (this.model.get("sync-refresh", false)) {
             this.refreshResources(aClass, syncRes);
         }
+        LOGGER.debugf("Sync completed for %s", aClass.getSimpleName());
     }
 
     public void close() {

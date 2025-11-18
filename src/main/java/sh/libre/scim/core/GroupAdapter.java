@@ -6,8 +6,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.util.regex.Pattern;
 import jakarta.persistence.NoResultException;
 
 import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
@@ -146,7 +145,7 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
 
     @Override
     public Stream<GroupModel> getResourceStream() {
-        return this.session.groups().getGroupsStream(this.session.getContext().getRealm());
+        return getFilteredGroups();
     }
 
     @Override
