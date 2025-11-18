@@ -158,7 +158,8 @@ public abstract class Adapter<M extends RoleMapperModel, S extends ResourceNode>
         if (model == null) {
             return this.session.groups().getGroupsStream(this.session.getContext().getRealm());
         }
-        var filter = model.get("group-filter");
+        var filterList = model.get("group-filter");
+        String filter = filterList != null && !filterList.isEmpty() ? filterList.get(0) : null;
         if (filter == null || filter.trim().isEmpty()) {
             return this.session.groups().getGroupsStream(this.session.getContext().getRealm());
         }
