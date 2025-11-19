@@ -34,11 +34,9 @@ jobs:
         run: ./gradlew shadowJar
 
       - name: Create Release with jar file
-        uses: "marvinpinto/action-automatic-releases@latest"
+        uses: softprops/action-gh-release@v1
         with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          automatic_release_tag: "v${{ env.VERSION }}"
-          prerelease: false
-          title: "keycloak-scim ${{ env.VERSION }} release"
-          files: |
-            ./build/libs/*.jar
+          tag_name: "v${{ env.VERSION }}"
+          name: "keycloak-scim ${{ env.VERSION }} release"
+          files: ./build/libs/*.jar
+          generate_release_notes: true
