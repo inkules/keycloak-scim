@@ -194,9 +194,35 @@ public class ScimClient {
                     // PUT not supported for groups, try PATCH
                     LOGGER.infof("PUT not supported for groups (405), trying PATCH for %s", adapter.getId());
                     response = adapter.toPatchBuilder(scimRequestBuilder, url).sendRequest();
-                } else if (statusCode == 404) {
+                    // Re-check after fallback
+                    if (!response.isSuccess()) {
+                        statusCode = response.getHttpStatus();
+                        if (statusCode == 404 || statusCode == 400) {
+                            // Resource doesn't exist, create it
+                            LOGGER.infof("Resource %s not found (%d), creating instead", adapter.getId(), statusCode);
+                            ServerResponse<S> createResponse = scimRequestBuilder
+                                .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
+                                .setResource(adapter.toSCIM(false))
+                                .sendRequest();
+                            if (createResponse.isSuccess()) {
+                                // Update the existing mapping with the new externalId
+                                adapter.apply(createResponse.getResource());
+                                var existingMapping = adapter.getMapping();
+                                if (existingMapping != null) {
+                                    existingMapping.setExternalId(adapter.getExternalId());
+                                    getEM().merge(existingMapping);
+                                } else {
+                                    adapter.saveMapping();
+                                }
+                                response = createResponse; // Use the successful create response
+                            } else {
+                                response = createResponse; // Return the failed create response for logging
+                            }
+                        }
+                    }
+                } else if (statusCode == 404 || statusCode == 400) {
                     // Resource doesn't exist, create it
-                    LOGGER.infof("Resource %s not found (404), creating instead", adapter.getId());
+                    LOGGER.infof("Resource %s not found (%d), creating instead", adapter.getId(), statusCode);
                     ServerResponse<S> createResponse = scimRequestBuilder
                         .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
                         .setResource(adapter.toSCIM(false))
