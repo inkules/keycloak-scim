@@ -28,7 +28,7 @@ jobs:
           gradle-version: 8.10.2
 
       - name: Get version
-        run: echo "VERSION=$(./gradlew properties --property version --quiet | tail -1 | cut -d'=' -f2)" >> $GITHUB_ENV
+        run: echo "VERSION=$(./gradlew -q properties | grep '^version:' | cut -d' ' -f2)" >> $GITHUB_ENV
 
       - name: Build with Gradle
         run: ./gradlew shadowJar
