@@ -65,9 +65,18 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         if (groupMembers != null && groupMembers.size() > 0) {
             this.members = new HashSet<String>();
             for (var groupMember : groupMembers) {
-                var userMapping = this.query("findByExternalId", groupMember.getValue().get(), "User")
-                        .getSingleResult();
-                this.members.add(userMapping.getId());
+                var value = groupMember.getValue().get();
+                // Assume value is email for Databricks
+                var user = session.users().getUserByEmail(realm, value);
+                if (user != null) {
+                    this.members.add(user.getId());
+                } else {
+                    // Fallback: try to find by username
+                    user = session.users().getUserByUsername(realm, value);
+                    if (user != null) {
+                        this.members.add(user.getId());
+                    }
+                }
             }
         }
     }
@@ -83,11 +92,13 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
             for (var member : members) {
                 var groupMember = new Member();
                 try {
-                    var userMapping = this.query("findById", member, "User").getSingleResult();
-                    groupMember.setValue(userMapping.getExternalId());
-                    var ref = new URI(String.format("Users/%s", userMapping.getExternalId()));
-                    groupMember.setRef(ref.toString());
-                    groupMembers.add(groupMember);
+                    var user = session.users().getUserById(realm, member);
+                    if (user != null && user.getEmail() != null) {
+                        groupMember.setValue(user.getEmail());
+                        var ref = new URI(String.format("Users/%s", user.getEmail()));
+                        groupMember.setRef(ref.toString());
+                        groupMembers.add(groupMember);
+                    }
                 } catch (Exception e) {
                     LOGGER.error(e);
                 }
@@ -162,8 +173,10 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         patchBuilder = scimRequestBuilder.patch(url, Group.class);
         if (members.size() > 0) {
             for (String member : members) {
-                var userMapping = this.query("findById", member, "User").getSingleResult();
-                groupMembers.add(Member.builder().value(userMapping.getExternalId()).build());
+                var user = session.users().getUserById(realm, member);
+                if (user != null && user.getEmail() != null) {
+                    groupMembers.add(Member.builder().value(user.getEmail()).build());
+                }
             }
             patchBuilder.addOperation()
                 .path("members")
