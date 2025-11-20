@@ -512,4 +512,18 @@ public class ScimClient {
             syncRes.increaseUpdated();
         }
     }
+
+    private <M extends RoleMapperModel, A extends Adapter<M, ?>> void trackFailed(SynchronizationResult syncRes, A adapter, String resourceInfo) {
+        if (syncRes instanceof ScimSynchronizationResult scimResult) {
+            if (adapter instanceof UserAdapter) {
+                scimResult.addFailedUser(resourceInfo);
+            } else if (adapter instanceof GroupAdapter) {
+                scimResult.addFailedGroup(resourceInfo);
+            } else {
+                syncRes.increaseFailed();
+            }
+        } else {
+            syncRes.increaseFailed();
+        }
+    }
 }
