@@ -192,35 +192,12 @@ public class ScimClient {
             if (!response.isSuccess()) {
                 int statusCode = response.getHttpStatus();
                 if (statusCode == 405 && adapter.getType().equals("Group") && !this.model.get("group-patchOp", false)) {
-                    // PUT not supported for groups, try PATCH
-                    LOGGER.infof("PUT not supported for groups (405), trying PATCH for %s", adapter.getId());
+                    // PUT not supported for groups, try multiple PATCH operations for Databricks compatibility
+                    LOGGER.infof("PUT not supported for groups (405), trying separate PATCH operations for %s", adapter.getId());
+                    
+                    // For now, just patch members since that's the main issue
+                    // TODO: Add support for patching displayName and externalId separately
                     response = adapter.toPatchBuilder(scimRequestBuilder, url).sendRequest();
-                    // Re-check after fallback
-                    if (!response.isSuccess()) {
-                        statusCode = response.getHttpStatus();
-                        if (statusCode == 404 || statusCode == 400) {
-                            // Resource doesn't exist, create it
-                            LOGGER.infof("Resource %s not found (%d), creating instead", adapter.getId(), statusCode);
-                            ServerResponse<S> createResponse = scimRequestBuilder
-                                .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
-                                .setResource(adapter.toSCIM(false))
-                                .sendRequest();
-                            if (createResponse.isSuccess()) {
-                                // Update the existing mapping with the new externalId
-                                adapter.apply(createResponse.getResource());
-                                var existingMapping = adapter.getMapping();
-                                if (existingMapping != null) {
-                                    existingMapping.setExternalId(adapter.getExternalId());
-                                    getEM().merge(existingMapping);
-                                } else {
-                                    adapter.saveMapping();
-                                }
-                                response = createResponse; // Use the successful create response
-                            } else {
-                                response = createResponse; // Return the failed create response for logging
-                            }
-                        }
-                    }
                 } else if (statusCode == 404 || statusCode == 400) {
                     // Resource doesn't exist, create it
                     LOGGER.infof("Resource %s not found (%d), creating instead", adapter.getId(), statusCode);
