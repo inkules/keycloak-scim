@@ -63,30 +63,17 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         setExternalId(group.getId().get());
         setDisplayName(group.getDisplayName().get());
         var groupMembers = group.getMembers();
-        var model = getModel();
-        String usernameSource = model != null ? model.getFirst("username-source") : "username";
         if (groupMembers != null && groupMembers.size() > 0) {
             this.members = new HashSet<String>();
             for (var groupMember : groupMembers) {
-                var value = groupMember.getValue().get();
-                UserModel user = null;
-                if ("email".equals(usernameSource)) {
-                    user = session.users().getUserByEmail(realm, value);
-                } else {
-                    user = session.users().getUserByUsername(realm, value);
-                }
-                if (user != null) {
-                    this.members.add(user.getId());
-                } else {
-                    // Fallback: try the other way
-                    if ("email".equals(usernameSource)) {
-                        user = session.users().getUserByUsername(realm, value);
-                    } else {
-                        user = session.users().getUserByEmail(realm, value);
-                    }
-                    if (user != null) {
-                        this.members.add(user.getId());
-                    }
+                var databricksUserId = groupMember.getValue().get();
+                try {
+                    // Find the Keycloak user by Databricks user ID (externalId)
+                    var userMapping = query("findByExternalId", databricksUserId, "User");
+                    var mapping = userMapping.getSingleResult();
+                    this.members.add(mapping.getId());
+                } catch (Exception e) {
+                    LOGGER.warn("Could not find user mapping for Databricks user ID: " + databricksUserId, e);
                 }
             }
         }
@@ -98,8 +85,6 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         group.setId(externalId);
         group.setExternalId(id);
         group.setDisplayName(displayName);
-        var model = getModel();
-        String usernameSource = model != null ? model.getFirst("username-source") : "username";
         if (members.size() > 0) {
             var groupMembers = new ArrayList<Member>();
             for (var member : members) {
@@ -107,9 +92,12 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
                 try {
                     var user = session.users().getUserById(realm, member);
                     if (user != null) {
-                        String scimUsername = "email".equals(usernameSource) && user.getEmail() != null ? user.getEmail() : user.getUsername();
-                        groupMember.setValue(scimUsername);
-                        var ref = new URI(String.format("Users/%s", scimUsername));
+                        // Get the Databricks user ID from the mapping
+                        var userMapping = query("findById", user.getId(), "User");
+                        var mapping = userMapping.getSingleResult();
+                        String databricksUserId = mapping.getExternalId();
+                        groupMember.setValue(databricksUserId);
+                        var ref = new URI(String.format("Users/%s", databricksUserId));
                         groupMember.setRef(ref.toString());
                         groupMembers.add(groupMember);
                     }
@@ -185,14 +173,19 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         List<Member> groupMembers = new ArrayList<>();
         PatchBuilder<Group> patchBuilder;
         patchBuilder = scimRequestBuilder.patch(url, Group.class);
-        var model = getModel();
-        String usernameSource = model != null ? model.getFirst("username-source") : "username";
         if (members.size() > 0) {
             for (String member : members) {
                 var user = session.users().getUserById(realm, member);
                 if (user != null) {
-                    String scimUsername = "email".equals(usernameSource) && user.getEmail() != null ? user.getEmail() : user.getUsername();
-                    groupMembers.add(Member.builder().value(scimUsername).build());
+                    try {
+                        // Get the Databricks user ID from the mapping
+                        var userMapping = query("findById", user.getId(), "User");
+                        var mapping = userMapping.getSingleResult();
+                        String databricksUserId = mapping.getExternalId();
+                        groupMembers.add(Member.builder().value(databricksUserId).build());
+                    } catch (Exception e) {
+                        LOGGER.error("Failed to get mapping for user " + user.getId(), e);
+                    }
                 }
             }
             patchBuilder.addOperation()
