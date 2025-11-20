@@ -1,6 +1,8 @@
 package sh.libre.scim.core;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import jakarta.persistence.EntityManager;
@@ -190,31 +192,45 @@ public class ScimClient {
                             } catch (Exception e) {
                                 LOGGER.warnf("Server-side filtering failed, trying client-side filtering: %s", e.getMessage());
                                 // Fallback: fetch all resources and filter client-side
+                                List<S> allResources = new ArrayList<>();
+                                int startIndex = 1;
+                                int count = 100;
+                                boolean fetchSuccess = false;
                                 try {
-                                    listResponse = scimRequestBuilder
-                                        .list("/" + adapter.getSCIMEndpoint(), adapter.getResourceClass())
-                                        .get()
-                                        .sendRequest();
-                                    usedServerFilter = false;
-                                    LOGGER.infof("Fallback list response success: %s, status: %d", listResponse.isSuccess(), listResponse.getHttpStatus());
-                                } catch (Exception e2) {
-                                    LOGGER.errorf("Both server-side and client-side filtering failed for %s: %s", adapter.getId(), e2.getMessage());
-                                    throw e2; // Re-throw the original exception
-                                }
-                            }
-                            
-                            if (listResponse != null && listResponse.isSuccess()) {
-                                ListResponse<S> listResource = listResponse.getResource();
-                                LOGGER.infof("Total results: %d", listResource.getTotalResults());
-                                
-                                S existingResource = null;
-                                if (usedServerFilter) {
-                                    // Server-side filtering worked
-                                    if (listResource.getTotalResults() > 0) {
-                                        existingResource = listResource.getListedResources().get(0);
-                                        LOGGER.infof("Found existing resource via server filter: %s", existingResource.getId());
+                                    while (true) {
+                                        ServerResponse<ListResponse<S>> pageResponse = scimRequestBuilder
+                                            .list("/" + adapter.getSCIMEndpoint(), adapter.getResourceClass())
+                                            .startIndex(startIndex)
+                                            .count(count)
+                                            .get()
+                                            .sendRequest();
+                                        if (!pageResponse.isSuccess()) {
+                                            LOGGER.warnf("Failed to fetch page at startIndex %d", startIndex);
+                                            if (allResources.isEmpty()) {
+                                                throw new Exception("Failed to fetch any pages");
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        ListResponse<S> page = pageResponse.getResource();
+                                        allResources.addAll(page.getListedResources());
+                                        long total = page.getTotalResults();
+                                        if ((long)allResources.size() >= total) {
+                                            break;
+                                        }
+                                        startIndex += count;
                                     }
-                                } else {
+                                    fetchSuccess = true;
+                                    LOGGER.infof("Fetched %d resources for client-side filtering", allResources.size());
+                                } catch (Exception e2) {
+                                    LOGGER.errorf("Client-side fetch failed: %s", e2.getMessage());
+                                    throw e2;
+                                }
+                                if (fetchSuccess) {
+                                    List<S> resources = allResources;
+                                    long totalResults = allResources.size();
+                                    LOGGER.infof("Total results: %d", totalResults);
+                                    S existingResource = null;
                                     // Client-side filtering
                                     String targetEmail = "";
                                     String targetDisplayName = "";
@@ -223,8 +239,7 @@ public class ScimClient {
                                     } else if (adapter instanceof GroupAdapter groupAdapter) {
                                         targetDisplayName = groupAdapter.getDisplayName();
                                     }
-                                    
-                                    for (S resource : listResource.getListedResources()) {
+                                    for (S resource : resources) {
                                         boolean match = false;
                                         if (adapter instanceof UserAdapter && !targetEmail.isEmpty()) {
                                             // Check if this resource has the target email
@@ -247,15 +262,34 @@ public class ScimClient {
                                                 }
                                             }
                                         }
-                                        
                                         if (match) {
                                             existingResource = resource;
                                             LOGGER.infof("Found existing resource via client filter: %s", existingResource.getId());
                                             break;
                                         }
                                     }
+                                    if (existingResource != null) {
+                                        adapter.apply(existingResource);
+                                        adapter.saveMapping();
+                                        LOGGER.infof("Mapped to existing resource for %s", adapter.getId());
+                                        // Now update it
+                                        this.replace(aClass, kcModel);
+                                        return response; // Return the original failed response, but mapping done
+                                    } else {
+                                        LOGGER.infof("No existing resources found with filter: %s", filter);
+                                    }
                                 }
-                                
+                            }
+                            
+                            if (listResponse != null && listResponse.isSuccess()) {
+                                ListResponse<S> listResource = listResponse.getResource();
+                                LOGGER.infof("Total results: %d", listResource.getTotalResults());
+                                S existingResource = null;
+                                // Server-side filtering worked
+                                if (listResource.getTotalResults() > 0) {
+                                    existingResource = listResource.getListedResources().get(0);
+                                    LOGGER.infof("Found existing resource via server filter: %s", existingResource.getId());
+                                }
                                 if (existingResource != null) {
                                     adapter.apply(existingResource);
                                     adapter.saveMapping();
