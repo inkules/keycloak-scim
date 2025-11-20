@@ -199,31 +199,14 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
                 .path("members")
                 .op(PatchOp.REPLACE)
                 .valueNodes(groupMembers)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("displayName")
-                .value(displayName)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("externalId")
-                .value(id)
                 .build();
         } else {
             patchBuilder.addOperation()
                 .path("members")
                 .op(PatchOp.REMOVE)
                 .value(null)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("displayName")
-                .value(displayName)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("externalId")
-                .value(id)
                 .build();
-
-            }
+        }
         LOGGER.info(patchBuilder.getResource());
         return patchBuilder;
     }
