@@ -168,7 +168,7 @@ public class ScimClient {
                     if (adapter instanceof UserAdapter userAdapter) {
                         String email = userAdapter.getEmail();
                         if (email != null) {
-                            filter = "emails.value eq \"" + email + "\"";
+                            filter = "userName eq \"" + email + "\"";
                         }
                     } else if (adapter instanceof GroupAdapter groupAdapter) {
                         String displayName = groupAdapter.getDisplayName();
