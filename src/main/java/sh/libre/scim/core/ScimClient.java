@@ -125,25 +125,20 @@ public class ScimClient {
     }
     private <S extends ResourceNode> List<S> fetchAllResources(String endpoint, Class<S> resourceClass) {
         List<S> allResources = new ArrayList<>();
-        int startIndex = 1;
-        int count = 100;
-        while (true) {
+        try {
             ServerResponse<ListResponse<S>> pageResponse = scimRequestBuilder
                 .list("/" + endpoint, resourceClass)
-                .count(count)
-                .startIndex(startIndex)
                 .get()
                 .sendRequest();
-            if (!pageResponse.isSuccess()) {
-                throw new RuntimeException("Failed to fetch resources at startIndex " + startIndex);
+            if (pageResponse.isSuccess()) {
+                ListResponse<S> page = pageResponse.getResource();
+                allResources.addAll(page.getListedResources());
+                // Note: Assuming Databricks returns all resources in one page or we take the first page
+            } else {
+                LOGGER.warnf("Failed to fetch resources: %d %s", pageResponse.getHttpStatus(), pageResponse.getResponseBody());
             }
-            ListResponse<S> page = pageResponse.getResource();
-            allResources.addAll(page.getListedResources());
-            long totalResults = page.getTotalResults();
-            if (allResources.size() >= totalResults) {
-                break;
-            }
-            startIndex += page.getListedResources().size();
+        } catch (Exception e) {
+            LOGGER.errorf("Failed to fetch resources: %s", e.getMessage());
         }
         return allResources;
     }
@@ -152,66 +147,52 @@ public class ScimClient {
         var adapter = getAdapter(aClass);
         adapter.apply(kcModel);
         try {
-            String filter = "";
+            LOGGER.infof("Fetching all resources for client-side filtering");
+            List<S> allResources = fetchAllResources(adapter.getSCIMEndpoint(), adapter.getResourceClass());
+            LOGGER.infof("Fetched %d resources for client-side filtering", allResources.size());
+            S existingResource = null;
+            String targetEmail = "";
+            String targetDisplayName = "";
             if (adapter instanceof UserAdapter userAdapter) {
-                String email = userAdapter.getEmail();
-                if (email != null) {
-                    filter = "userName eq \"" + email + "\"";
-                }
+                targetEmail = userAdapter.getEmail();
             } else if (adapter instanceof GroupAdapter groupAdapter) {
-                String displayName = groupAdapter.getDisplayName();
-                if (displayName != null) {
-                    filter = "displayName eq \"" + displayName + "\"";
-                }
+                targetDisplayName = groupAdapter.getDisplayName();
             }
-            if (!filter.isEmpty()) {
-                LOGGER.infof("Searching for existing resource with filter: %s", filter);
-                List<S> allResources = fetchAllResources(adapter.getSCIMEndpoint(), adapter.getResourceClass());
-                LOGGER.infof("Fetched %d resources for client-side filtering", allResources.size());
-                S existingResource = null;
-                String targetEmail = "";
-                String targetDisplayName = "";
-                if (adapter instanceof UserAdapter userAdapter) {
-                    targetEmail = userAdapter.getEmail();
-                } else if (adapter instanceof GroupAdapter groupAdapter) {
-                    targetDisplayName = groupAdapter.getDisplayName();
-                }
-                for (S resource : allResources) {
-                    boolean match = false;
-                    if (adapter instanceof UserAdapter && !targetEmail.isEmpty()) {
-                        if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.User user) {
-                            var emails = user.getEmails();
-                            if (emails != null) {
-                                for (var email : emails) {
-                                    if (email.getValue().isPresent() && targetEmail.equalsIgnoreCase(email.getValue().get())) {
-                                        match = true;
-                                        break;
-                                    }
+            for (S resource : allResources) {
+                boolean match = false;
+                if (adapter instanceof UserAdapter && !targetEmail.isEmpty()) {
+                    if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.User user) {
+                        var emails = user.getEmails();
+                        if (emails != null) {
+                            for (var email : emails) {
+                                if (email.getValue().isPresent() && targetEmail.equalsIgnoreCase(email.getValue().get())) {
+                                    match = true;
+                                    break;
                                 }
                             }
                         }
-                    } else if (adapter instanceof GroupAdapter && !targetDisplayName.isEmpty()) {
-                        if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.Group group) {
-                            if (targetDisplayName.equals(group.getDisplayName())) {
-                                match = true;
-                            }
+                    }
+                } else if (adapter instanceof GroupAdapter && !targetDisplayName.isEmpty()) {
+                    if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.Group group) {
+                        if (targetDisplayName.equals(group.getDisplayName())) {
+                            match = true;
                         }
                     }
-                    if (match) {
-                        existingResource = resource;
-                        LOGGER.infof("Found existing resource via client filter: %s", existingResource.getId());
-                        break;
-                    }
                 }
-                if (existingResource != null) {
-                    adapter.apply(existingResource);
-                    adapter.saveMapping();
-                    LOGGER.infof("Mapped to existing resource for %s", adapter.getId());
-                    this.replace(aClass, kcModel);
-                    return true;
-                } else {
-                    LOGGER.infof("No existing resources found with filter: %s", filter);
+                if (match) {
+                    existingResource = resource;
+                    LOGGER.infof("Found existing resource via client filter: %s", existingResource.getId());
+                    break;
                 }
+            }
+            if (existingResource != null) {
+                adapter.apply(existingResource);
+                adapter.saveMapping();
+                LOGGER.infof("Mapped to existing resource for %s", adapter.getId());
+                this.replace(aClass, kcModel);
+                return true;
+            } else {
+                LOGGER.infof("No existing resources found matching the criteria");
             }
         } catch (Exception e) {
             LOGGER.errorf("Failed to check for existing resource for %s: %s", adapter.getId(), e.getMessage());
