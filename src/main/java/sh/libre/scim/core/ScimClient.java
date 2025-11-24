@@ -147,7 +147,7 @@ public class ScimClient {
         var adapter = getAdapter(aClass);
         adapter.apply(kcModel);
         try {
-            LOGGER.infof("Fetching all resources for client-side filtering");
+            LOGGER.infof("Fetching all resources for client-side filtering for %s", adapter.getId());
             List<S> allResources = fetchAllResources(adapter.getSCIMEndpoint(), adapter.getResourceClass());
             LOGGER.infof("Fetched %d resources for client-side filtering", allResources.size());
             S existingResource = null;
@@ -155,8 +155,10 @@ public class ScimClient {
             String targetDisplayName = "";
             if (adapter instanceof UserAdapter userAdapter) {
                 targetEmail = userAdapter.getEmail();
+                LOGGER.infof("Target email for mapping: %s", targetEmail);
             } else if (adapter instanceof GroupAdapter groupAdapter) {
                 targetDisplayName = groupAdapter.getDisplayName();
+                LOGGER.infof("Target displayName for mapping: %s", targetDisplayName);
             }
             for (S resource : allResources) {
                 boolean match = false;
@@ -165,16 +167,22 @@ public class ScimClient {
                         var emails = user.getEmails();
                         if (emails != null) {
                             for (var email : emails) {
-                                if (email.getValue().isPresent() && targetEmail.equalsIgnoreCase(email.getValue().get())) {
-                                    match = true;
-                                    break;
+                                if (email.getValue().isPresent()) {
+                                    String resEmail = email.getValue().get();
+                                    LOGGER.debugf("Checking resource email: %s against target: %s", resEmail, targetEmail);
+                                    if (targetEmail.equalsIgnoreCase(resEmail)) {
+                                        match = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
                 } else if (adapter instanceof GroupAdapter && !targetDisplayName.isEmpty()) {
                     if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.Group group) {
-                        if (targetDisplayName.equals(group.getDisplayName())) {
+                        String resDisplayName = group.getDisplayName();
+                        LOGGER.debugf("Checking resource displayName: %s against target: %s", resDisplayName, targetDisplayName);
+                        if (targetDisplayName.equals(resDisplayName)) {
                             match = true;
                         }
                     }
@@ -192,10 +200,10 @@ public class ScimClient {
                 this.replace(aClass, kcModel);
                 return true;
             } else {
-                LOGGER.infof("No existing resources found matching the criteria");
+                LOGGER.infof("No existing resources found matching the criteria for %s", adapter.getId());
             }
         } catch (Exception e) {
-            LOGGER.errorf("Failed to check for existing resource for %s: %s", adapter.getId(), e.getMessage());
+            LOGGER.errorf("Failed to check for existing resource for %s: %s", adapter.getId(), e.getMessage(), e);
         }
         return false;
     }
