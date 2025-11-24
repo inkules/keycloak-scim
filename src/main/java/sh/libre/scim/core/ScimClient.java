@@ -180,7 +180,7 @@ public class ScimClient {
                     }
                 } else if (adapter instanceof GroupAdapter && !targetDisplayName.isEmpty()) {
                     if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.Group group) {
-                        String resDisplayName = group.getDisplayName();
+                        String resDisplayName = group.getDisplayName().orElse("");
                         LOGGER.debugf("Checking resource displayName: %s against target: %s", resDisplayName, targetDisplayName);
                         if (targetDisplayName.equals(resDisplayName)) {
                             match = true;
