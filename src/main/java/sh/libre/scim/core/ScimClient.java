@@ -262,7 +262,7 @@ public class ScimClient {
                 tryMapToExisting(aClass, kcModel);
             }
             LOGGER.warn(response.getResponseBody());
-            LOGGER.warn(response.getHttpStatus());
+            LOGGER.debug(response.getHttpStatus());
         }
 
         if (response.isSuccess()) {
@@ -287,7 +287,7 @@ public class ScimClient {
             var retry = registry.retry("replace-" + adapter.getId());
             ServerResponse<S> response = retry.executeSupplier(() -> {
                 try {
-                    LOGGER.info(adapter.getType());
+                    LOGGER.debug(adapter.getType());
                     if ((adapter.getType() == "Group" && this.model.get("group-patchOp", false))
                          || (adapter.getType() == "User" && this.model.get("user-patchOp", false))) {
                         return adapter.toPatchBuilder(scimRequestBuilder, url)
@@ -340,7 +340,7 @@ public class ScimClient {
             
             if (!response.isSuccess()){
                 LOGGER.warn(response.getResponseBody());
-                LOGGER.warn(response.getHttpStatus());
+                LOGGER.debug(response.getHttpStatus());
             }
         } catch (NoResultException e) {
             LOGGER.warnf("failed to replace resource %s, scim mapping not found", adapter.getId());
@@ -373,7 +373,7 @@ public class ScimClient {
 
             if (!response.isSuccess()){
                 LOGGER.warn(response.getResponseBody());
-                LOGGER.warn(response.getHttpStatus());
+                LOGGER.debug(response.getHttpStatus());
             }
 
             getEM().remove(resource);
@@ -386,7 +386,6 @@ public class ScimClient {
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void refreshResources(
             Class<A> aClass,
             SynchronizationResult syncRes) {
-        LOGGER.info("Refresh resources");
         LOGGER.debugf("Refreshing resources for %s", aClass.getSimpleName());
         getAdapter(aClass).getResourceStream().forEach(resource -> {
             var adapter = getAdapter(aClass);
