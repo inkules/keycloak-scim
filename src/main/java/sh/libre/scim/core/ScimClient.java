@@ -123,6 +123,101 @@ public class ScimClient {
             throw new RuntimeException(e);
         }
     }
+    private <S extends ResourceNode> List<S> fetchAllResources(String endpoint, Class<S> resourceClass) {
+        List<S> allResources = new ArrayList<>();
+        int startIndex = 1;
+        int count = 100;
+        while (true) {
+            ServerResponse<ListResponse<S>> pageResponse = scimRequestBuilder
+                .list("/" + endpoint, resourceClass)
+                .count(count)
+                .startIndex(startIndex)
+                .get()
+                .sendRequest();
+            if (!pageResponse.isSuccess()) {
+                throw new RuntimeException("Failed to fetch resources at startIndex " + startIndex);
+            }
+            ListResponse<S> page = pageResponse.getResource();
+            allResources.addAll(page.getListedResources());
+            long totalResults = page.getTotalResults();
+            if (allResources.size() >= totalResults) {
+                break;
+            }
+            startIndex += page.getListedResources().size();
+        }
+        return allResources;
+    }
+
+    private <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> boolean tryMapToExisting(Class<A> aClass, M kcModel) {
+        var adapter = getAdapter(aClass);
+        adapter.apply(kcModel);
+        try {
+            String filter = "";
+            if (adapter instanceof UserAdapter userAdapter) {
+                String email = userAdapter.getEmail();
+                if (email != null) {
+                    filter = "userName eq \"" + email + "\"";
+                }
+            } else if (adapter instanceof GroupAdapter groupAdapter) {
+                String displayName = groupAdapter.getDisplayName();
+                if (displayName != null) {
+                    filter = "displayName eq \"" + displayName + "\"";
+                }
+            }
+            if (!filter.isEmpty()) {
+                LOGGER.infof("Searching for existing resource with filter: %s", filter);
+                List<S> allResources = fetchAllResources(adapter.getSCIMEndpoint(), adapter.getResourceClass());
+                LOGGER.infof("Fetched %d resources for client-side filtering", allResources.size());
+                S existingResource = null;
+                String targetEmail = "";
+                String targetDisplayName = "";
+                if (adapter instanceof UserAdapter userAdapter) {
+                    targetEmail = userAdapter.getEmail();
+                } else if (adapter instanceof GroupAdapter groupAdapter) {
+                    targetDisplayName = groupAdapter.getDisplayName();
+                }
+                for (S resource : allResources) {
+                    boolean match = false;
+                    if (adapter instanceof UserAdapter && !targetEmail.isEmpty()) {
+                        if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.User user) {
+                            var emails = user.getEmails();
+                            if (emails != null) {
+                                for (var email : emails) {
+                                    if (email.getValue().isPresent() && targetEmail.equalsIgnoreCase(email.getValue().get())) {
+                                        match = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else if (adapter instanceof GroupAdapter && !targetDisplayName.isEmpty()) {
+                        if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.Group group) {
+                            if (targetDisplayName.equals(group.getDisplayName())) {
+                                match = true;
+                            }
+                        }
+                    }
+                    if (match) {
+                        existingResource = resource;
+                        LOGGER.infof("Found existing resource via client filter: %s", existingResource.getId());
+                        break;
+                    }
+                }
+                if (existingResource != null) {
+                    adapter.apply(existingResource);
+                    adapter.saveMapping();
+                    LOGGER.infof("Mapped to existing resource for %s", adapter.getId());
+                    this.replace(aClass, kcModel);
+                    return true;
+                } else {
+                    LOGGER.infof("No existing resources found with filter: %s", filter);
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.errorf("Failed to check for existing resource for %s: %s", adapter.getId(), e.getMessage());
+        }
+        return false;
+    }
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> ServerResponse<S> create(Class<A> aClass,
             M kcModel) {
@@ -135,6 +230,23 @@ public class ScimClient {
         if (adapter.query("findById", adapter.getId()).getResultList().size() != 0) {
             return null;
         }
+
+        // Check if we should map to existing
+        boolean shouldMap = false;
+        String mapUsersConfig = this.model.get("map-existing-users");
+        LOGGER.infof("map-existing-users config value: '%s'", mapUsersConfig);
+        if (adapter instanceof UserAdapter && "true".equals(mapUsersConfig)) {
+            shouldMap = true;
+        } else if (adapter instanceof GroupAdapter && "true".equals(this.model.get("map-existing-groups"))) {
+            shouldMap = true;
+        }
+
+        if (shouldMap) {
+            if (tryMapToExisting(aClass, kcModel)) {
+                return null;
+            }
+        }
+
         LOGGER.debugf("Creating SCIM resource for %s", adapter.getId());
         var retry = registry.retry("create-" + adapter.getId());
 
@@ -151,109 +263,9 @@ public class ScimClient {
 
         if (!response.isSuccess()){
             int statusCode = response.getHttpStatus();
-            // Check if we should map to existing
-            boolean shouldMap = false;
-            String mapUsersConfig = this.model.get("map-existing-users");
-            LOGGER.infof("map-existing-users config value: '%s'", mapUsersConfig);
-            if (adapter instanceof UserAdapter && "true".equals(mapUsersConfig)) {
-                shouldMap = true;
-            } else if (adapter instanceof GroupAdapter && "true".equals(this.model.get("map-existing-groups"))) {
-                shouldMap = true;
-            }
             if (shouldMap && statusCode >= 400) {
                 LOGGER.infof("Create failed with %d for %s, attempting to map to existing resource", statusCode, adapter.getId());
-                try {
-                    // Query for existing resource
-                    String filter = "";
-                    if (adapter instanceof UserAdapter userAdapter) {
-                        String email = userAdapter.getEmail();
-                        if (email != null) {
-                            filter = "userName eq \"" + email + "\"";
-                        }
-                    } else if (adapter instanceof GroupAdapter groupAdapter) {
-                        String displayName = groupAdapter.getDisplayName();
-                        if (displayName != null) {
-                            filter = "displayName eq \"" + displayName + "\"";
-                        }
-                    }
-                    if (!filter.isEmpty()) {
-                        LOGGER.infof("Searching for existing resource with filter: %s", filter);
-                        // Always use client-side filtering to avoid permission issues with server-side filters
-                        List<S> allResources = new ArrayList<>();
-                        boolean fetchSuccess = false;
-                        try {
-                            ServerResponse<ListResponse<S>> pageResponse = scimRequestBuilder
-                                .list("/" + adapter.getSCIMEndpoint(), adapter.getResourceClass())
-                                .get()
-                                .sendRequest();
-                            if (!pageResponse.isSuccess()) {
-                                throw new Exception("Failed to fetch resources");
-                            }
-                            ListResponse<S> page = pageResponse.getResource();
-                            allResources.addAll(page.getListedResources());
-                            fetchSuccess = true;
-                            LOGGER.infof("Fetched %d resources for client-side filtering", allResources.size());
-                        } catch (Exception e2) {
-                            LOGGER.errorf("Client-side fetch failed: %s", e2.getMessage());
-                            throw e2;
-                        }
-                        if (fetchSuccess) {
-                            List<S> resources = allResources;
-                            long totalResults = allResources.size();
-                            LOGGER.infof("Total results: %d", totalResults);
-                            S existingResource = null;
-                            // Client-side filtering
-                            String targetEmail = "";
-                            String targetDisplayName = "";
-                            if (adapter instanceof UserAdapter userAdapter) {
-                                targetEmail = userAdapter.getEmail();
-                            } else if (adapter instanceof GroupAdapter groupAdapter) {
-                                targetDisplayName = groupAdapter.getDisplayName();
-                            }
-                            for (S resource : resources) {
-                                boolean match = false;
-                                if (adapter instanceof UserAdapter && !targetEmail.isEmpty()) {
-                                    // Check if this resource has the target email
-                                    if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.User user) {
-                                        var emails = user.getEmails();
-                                        if (emails != null) {
-                                            for (var email : emails) {
-                                                if (email.getValue().isPresent() && targetEmail.equalsIgnoreCase(email.getValue().get())) {
-                                                    match = true;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else if (adapter instanceof GroupAdapter && !targetDisplayName.isEmpty()) {
-                                    // Check if this resource has the target display name
-                                    if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.Group group) {
-                                        if (targetDisplayName.equals(group.getDisplayName())) {
-                                            match = true;
-                                        }
-                                    }
-                                }
-                                if (match) {
-                                    existingResource = resource;
-                                    LOGGER.infof("Found existing resource via client filter: %s", existingResource.getId());
-                                    break;
-                                }
-                            }
-                            if (existingResource != null) {
-                                adapter.apply(existingResource);
-                                adapter.saveMapping();
-                                LOGGER.infof("Mapped to existing resource for %s", adapter.getId());
-                                // Now update it
-                                this.replace(aClass, kcModel);
-                                return response; // Return the original failed response, but mapping done
-                            } else {
-                                LOGGER.infof("No existing resources found with filter: %s", filter);
-                            }
-                        }
-                    }
-                } catch (Exception e) {
-                    LOGGER.errorf("Failed to map to existing resource for %s: %s", adapter.getId(), e.getMessage());
-                }
+                tryMapToExisting(aClass, kcModel);
             }
             LOGGER.warn(response.getResponseBody());
             LOGGER.warn(response.getHttpStatus());
@@ -584,4 +596,5 @@ public class ScimClient {
             syncRes.increaseFailed();
         }
     }
+
 }
