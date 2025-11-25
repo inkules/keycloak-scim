@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import jakarta.persistence.NoResultException;
@@ -20,6 +21,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.jboss.logging.Logger;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.UserModel;
 
 public class GroupAdapter extends Adapter<GroupModel, Group> {
 
@@ -64,9 +66,15 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         if (groupMembers != null && groupMembers.size() > 0) {
             this.members = new HashSet<String>();
             for (var groupMember : groupMembers) {
-                var userMapping = this.query("findByExternalId", groupMember.getValue().get(), "User")
-                        .getSingleResult();
-                this.members.add(userMapping.getId());
+                var databricksUserId = groupMember.getValue().get();
+                try {
+                    // Find the Keycloak user by Databricks user ID (externalId)
+                    var userMapping = query("findByExternalId", databricksUserId, "User");
+                    var mapping = userMapping.getSingleResult();
+                    this.members.add(mapping.getId());
+                } catch (Exception e) {
+                    LOGGER.warn("Could not find user mapping for Databricks user ID: " + databricksUserId, e);
+                }
             }
         }
     }
@@ -82,11 +90,17 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
             for (var member : members) {
                 var groupMember = new Member();
                 try {
-                    var userMapping = this.query("findById", member, "User").getSingleResult();
-                    groupMember.setValue(userMapping.getExternalId());
-                    var ref = new URI(String.format("Users/%s", userMapping.getExternalId()));
-                    groupMember.setRef(ref.toString());
-                    groupMembers.add(groupMember);
+                    var user = session.users().getUserById(realm, member);
+                    if (user != null) {
+                        // Get the Databricks user ID from the mapping
+                        var userMapping = query("findById", user.getId(), "User");
+                        var mapping = userMapping.getSingleResult();
+                        String databricksUserId = mapping.getExternalId();
+                        groupMember.setValue(databricksUserId);
+                        var ref = new URI(String.format("Users/%s", databricksUserId));
+                        groupMember.setRef(ref.toString());
+                        groupMembers.add(groupMember);
+                    }
                 } catch (Exception e) {
                     LOGGER.error(e);
                 }
@@ -146,7 +160,7 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
 
     @Override
     public Stream<GroupModel> getResourceStream() {
-        return this.session.groups().getGroupsStream(this.session.getContext().getRealm());
+        return getFilteredGroups();
     }
 
     @Override
@@ -161,38 +175,31 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         patchBuilder = scimRequestBuilder.patch(url, Group.class);
         if (members.size() > 0) {
             for (String member : members) {
-                var userMapping = this.query("findById", member, "User").getSingleResult();
-                groupMembers.add(Member.builder().value(userMapping.getExternalId()).build());
+                var user = session.users().getUserById(realm, member);
+                if (user != null) {
+                    try {
+                        // Get the Databricks user ID from the mapping
+                        var userMapping = query("findById", user.getId(), "User");
+                        var mapping = userMapping.getSingleResult();
+                        String databricksUserId = mapping.getExternalId();
+                        groupMembers.add(Member.builder().value(databricksUserId).build());
+                    } catch (Exception e) {
+                        LOGGER.error("Failed to get mapping for user " + user.getId(), e);
+                    }
+                }
             }
             patchBuilder.addOperation()
                 .path("members")
                 .op(PatchOp.REPLACE)
                 .valueNodes(groupMembers)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("displayName")
-                .value(displayName)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("externalId")
-                .value(id)
                 .build();
         } else {
             patchBuilder.addOperation()
                 .path("members")
                 .op(PatchOp.REMOVE)
                 .value(null)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("displayName")
-                .value(displayName)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("externalId")
-                .value(id)
                 .build();
-
-            }
+        }
         LOGGER.info(patchBuilder.getResource());
         return patchBuilder;
     }

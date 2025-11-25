@@ -1,6 +1,8 @@
 package sh.libre.scim.core;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import jakarta.persistence.EntityManager;
@@ -21,6 +23,7 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RoleMapperModel;
 import org.keycloak.storage.user.SynchronizationResult;
+import sh.libre.scim.storage.ScimSynchronizationResult;
 
 import com.google.common.net.HttpHeaders;
 
@@ -84,9 +87,9 @@ public class ScimClient {
     protected ScimClientConfig genScimClientConfig() {
         return ScimClientConfig.builder()
         .httpHeaders(defaultHeaders)
-        .connectTimeout(5)
-        .requestTimeout(5)
-        .socketTimeout(5)
+        .connectTimeout(30)
+        .requestTimeout(30)
+        .socketTimeout(30)
         .expectedHttpResponseHeaders(expectedResponseHeaders)
         .hostnameVerifier((s, sslSession) -> true)
         .build();
@@ -120,18 +123,125 @@ public class ScimClient {
             throw new RuntimeException(e);
         }
     }
+    private <S extends ResourceNode> List<S> fetchAllResources(String endpoint, Class<S> resourceClass) {
+        List<S> allResources = new ArrayList<>();
+        try {
+            String listUrl = scimApplicationBaseUrl + "/" + endpoint;
+            LOGGER.infof("Sending SCIM list request to URL: %s", listUrl);
+            ServerResponse<ListResponse<S>> pageResponse = scimRequestBuilder
+                .list(listUrl, resourceClass)
+                .get()
+                .sendRequest();
+            LOGGER.info("Received response for list request: status=" + pageResponse.getHttpStatus() + ", success=" + pageResponse.isSuccess());
+            if (pageResponse.isSuccess()) {
+                ListResponse<S> page = pageResponse.getResource();
+                allResources.addAll(page.getListedResources());
+                LOGGER.infof("Fetched %d resources from response", allResources.size());
+                // Note: Assuming Databricks returns all resources in one page or we take the first page
+            } else {
+                LOGGER.warnf("Failed to fetch resources: HTTP %d - %s", pageResponse.getHttpStatus(), pageResponse.getResponseBody());
+            }
+        } catch (Exception e) {
+            LOGGER.error("Failed to fetch resources", e);
+            LOGGER.errorf("Failed to fetch resources: %s", e.getMessage());
+        }
+        return allResources;
+    }
 
-    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void create(Class<A> aClass,
+    private <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> boolean tryMapToExisting(Class<A> aClass, M kcModel) {
+        var adapter = getAdapter(aClass);
+        adapter.apply(kcModel);
+        try {
+            LOGGER.infof("Fetching all resources for client-side filtering for %s", adapter.getId());
+            List<S> allResources = fetchAllResources(adapter.getSCIMEndpoint(), adapter.getResourceClass());
+            LOGGER.infof("Fetched %d resources for client-side filtering", allResources.size());
+            S existingResource = null;
+            String targetEmail = "";
+            String targetDisplayName = "";
+            if (adapter instanceof UserAdapter userAdapter) {
+                targetEmail = userAdapter.getEmail();
+                LOGGER.infof("Target email for mapping: %s", targetEmail);
+            } else if (adapter instanceof GroupAdapter groupAdapter) {
+                targetDisplayName = groupAdapter.getDisplayName();
+                LOGGER.infof("Target displayName for mapping: %s", targetDisplayName);
+            }
+            for (S resource : allResources) {
+                boolean match = false;
+                if (adapter instanceof UserAdapter && !targetEmail.isEmpty()) {
+                    if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.User user) {
+                        var emails = user.getEmails();
+                        if (emails != null) {
+                            for (var email : emails) {
+                                if (email.getValue().isPresent()) {
+                                    String resEmail = email.getValue().get();
+                                    LOGGER.debugf("Checking resource email: %s against target: %s", resEmail, targetEmail);
+                                    if (targetEmail.equalsIgnoreCase(resEmail)) {
+                                        match = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if (adapter instanceof GroupAdapter && !targetDisplayName.isEmpty()) {
+                    if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.Group group) {
+                        String resDisplayName = group.getDisplayName().orElse("");
+                        LOGGER.debugf("Checking resource displayName: %s against target: %s", resDisplayName, targetDisplayName);
+                        if (targetDisplayName.equals(resDisplayName)) {
+                            match = true;
+                        }
+                    }
+                }
+                if (match) {
+                    existingResource = resource;
+                    LOGGER.infof("Found existing resource via client filter: %s", existingResource.getId());
+                    break;
+                }
+            }
+            if (existingResource != null) {
+                adapter.apply(existingResource);
+                adapter.saveMapping();
+                LOGGER.infof("Mapped to existing resource for %s", adapter.getId());
+                this.replace(aClass, kcModel);
+                return true;
+            } else {
+                LOGGER.infof("No existing resources found matching the criteria for %s", adapter.getId());
+            }
+        } catch (Exception e) {
+            LOGGER.errorf("Failed to check for existing resource for %s: %s", adapter.getId(), e.getMessage(), e);
+        }
+        return false;
+    }
+
+    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> ServerResponse<S> create(Class<A> aClass,
             M kcModel) {
         var adapter = getAdapter(aClass);
         adapter.apply(kcModel);
         if (adapter.skip) {
-            return;
+            return null;
         }
         // If mapping exist then it was created by import so skip.
         if (adapter.query("findById", adapter.getId()).getResultList().size() != 0) {
-            return;
+            return null;
         }
+
+        // Check if we should map to existing
+        boolean shouldMap = false;
+        String mapUsersConfig = this.model.get("map-existing-users");
+        LOGGER.infof("map-existing-users config value: '%s'", mapUsersConfig);
+        if (adapter instanceof UserAdapter && "true".equals(mapUsersConfig)) {
+            shouldMap = true;
+        } else if (adapter instanceof GroupAdapter && "true".equals(this.model.get("map-existing-groups"))) {
+            shouldMap = true;
+        }
+
+        if (shouldMap) {
+            if (tryMapToExisting(aClass, kcModel)) {
+                return null;
+            }
+        }
+
+        LOGGER.debugf("Creating SCIM resource for %s", adapter.getId());
         var retry = registry.retry("create-" + adapter.getId());
 
         ServerResponse<S> response = retry.executeSupplier(() -> {
@@ -146,12 +256,20 @@ public class ScimClient {
         });
 
         if (!response.isSuccess()){
+            int statusCode = response.getHttpStatus();
+            if (shouldMap && statusCode >= 400) {
+                LOGGER.infof("Create failed with %d for %s, attempting to map to existing resource", statusCode, adapter.getId());
+                tryMapToExisting(aClass, kcModel);
+            }
             LOGGER.warn(response.getResponseBody());
-            LOGGER.warn(response.getHttpStatus());
+            LOGGER.debug(response.getHttpStatus());
         }
 
-        adapter.apply(response.getResource());
-        adapter.saveMapping();
+        if (response.isSuccess()) {
+            adapter.apply(response.getResource());
+            adapter.saveMapping();
+        }
+        return response;
     };
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void replace(Class<A> aClass,
@@ -165,10 +283,11 @@ public class ScimClient {
             var resource = adapter.query("findById", adapter.getId()).getSingleResult();
             adapter.apply(resource);
             String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
+            LOGGER.debugf("Replacing SCIM resource for %s at %s", adapter.getId(), url);
             var retry = registry.retry("replace-" + adapter.getId());
             ServerResponse<S> response = retry.executeSupplier(() -> {
                 try {
-                    LOGGER.info(adapter.getType());
+                    LOGGER.debug(adapter.getType());
                     if ((adapter.getType() == "Group" && this.model.get("group-patchOp", false))
                          || (adapter.getType() == "User" && this.model.get("user-patchOp", false))) {
                         return adapter.toPatchBuilder(scimRequestBuilder, url)
@@ -184,9 +303,44 @@ public class ScimClient {
                     throw new RuntimeException(e);
                 }
             });
+            
+            // Handle error responses
+            if (!response.isSuccess()) {
+                int statusCode = response.getHttpStatus();
+                if (statusCode == 405 && adapter.getType().equals("Group") && !this.model.get("group-patchOp", false)) {
+                    // PUT not supported for groups, try multiple PATCH operations for Databricks compatibility
+                    LOGGER.infof("PUT not supported for groups (405), trying separate PATCH operations for %s", adapter.getId());
+                    
+                    // For now, just patch members since that's the main issue
+                    // TODO: Add support for patching displayName and externalId separately
+                    response = adapter.toPatchBuilder(scimRequestBuilder, url).sendRequest();
+                } else if (statusCode == 404 || statusCode == 400) {
+                    // Resource doesn't exist, create it
+                    LOGGER.infof("Resource %s not found (%d), creating instead", adapter.getId(), statusCode);
+                    ServerResponse<S> createResponse = scimRequestBuilder
+                        .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
+                        .setResource(adapter.toSCIM(false))
+                        .sendRequest();
+                    if (createResponse.isSuccess()) {
+                        // Update the existing mapping with the new externalId
+                        adapter.apply(createResponse.getResource());
+                        var existingMapping = adapter.getMapping();
+                        if (existingMapping != null) {
+                            existingMapping.setExternalId(adapter.getExternalId());
+                            getEM().merge(existingMapping);
+                        } else {
+                            adapter.saveMapping();
+                        }
+                        response = createResponse; // Use the successful create response
+                    } else {
+                        response = createResponse; // Return the failed create response for logging
+                    }
+                }
+            }
+            
             if (!response.isSuccess()){
                 LOGGER.warn(response.getResponseBody());
-                LOGGER.warn(response.getHttpStatus());
+                LOGGER.debug(response.getHttpStatus());
             }
         } catch (NoResultException e) {
             LOGGER.warnf("failed to replace resource %s, scim mapping not found", adapter.getId());
@@ -199,6 +353,7 @@ public class ScimClient {
             String id) {
         var adapter = getAdapter(aClass);
         adapter.setId(id);
+        LOGGER.debugf("Deleting SCIM resource for %s", id);
 
         try {
             var resource = adapter.query("findById", adapter.getId()).getSingleResult();
@@ -218,7 +373,7 @@ public class ScimClient {
 
             if (!response.isSuccess()){
                 LOGGER.warn(response.getResponseBody());
-                LOGGER.warn(response.getHttpStatus());
+                LOGGER.debug(response.getHttpStatus());
             }
 
             getEM().remove(resource);
@@ -231,21 +386,32 @@ public class ScimClient {
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void refreshResources(
             Class<A> aClass,
             SynchronizationResult syncRes) {
-        LOGGER.info("Refresh resources");
+        LOGGER.debugf("Refreshing resources for %s", aClass.getSimpleName());
         getAdapter(aClass).getResourceStream().forEach(resource -> {
             var adapter = getAdapter(aClass);
             adapter.apply(resource);
-            LOGGER.infof("Reconciling local resource %s", adapter.getId());
+            String resourceInfo = getResourceInfo(adapter);
+            LOGGER.infof("Reconciling local resource %s: %s", adapter.getId(), resourceInfo);
             if (!adapter.skipRefresh()) {
                 var mapping = adapter.getMapping();
                 if (mapping == null) {
-                    LOGGER.info("Creating it");
-                    this.create(aClass, resource);
+                    LOGGER.infof("Creating remote resource for %s", resourceInfo);
+                    ServerResponse<S> createResponse = this.create(aClass, resource);
+                    if (createResponse != null && createResponse.isSuccess()) {
+                        trackAdded(syncRes, adapter, resourceInfo);
+                    } else if (adapter.getMapping() != null) {
+                        // Mapped to existing
+                        trackMapped(syncRes, adapter, resourceInfo);
+                    } else {
+                        trackFailed(syncRes, adapter, resourceInfo + " (create failed)");
+                    }
                 } else {
-                    LOGGER.info("Replacing it");
+                    LOGGER.infof("Updating remote resource for %s", resourceInfo);
                     this.replace(aClass, resource);
+                    trackUpdated(syncRes, adapter, resourceInfo);
                 }
-                syncRes.increaseUpdated();
+            } else {
+                LOGGER.infof("Skipping refresh for %s", resourceInfo);
             }
         });
 
@@ -254,9 +420,10 @@ public class ScimClient {
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void importResources(
             Class<A> aClass, SynchronizationResult syncRes) {
         LOGGER.info("Import");
+        LOGGER.debugf("Importing resources for %s", aClass.getSimpleName());
         try {
             var adapter = getAdapter(aClass);
-            ServerResponse<ListResponse<S>> response  = scimRequestBuilder.list("url", adapter.getResourceClass()).get().sendRequest();
+            ServerResponse<ListResponse<S>> response  = scimRequestBuilder.list(scimApplicationBaseUrl + "/" + adapter.getSCIMEndpoint(), adapter.getResourceClass()).get().sendRequest();
             ListResponse<S> resourceTypeListResponse = response.getResource();
 
             for (var resource : resourceTypeListResponse.getListedResources()) {
@@ -265,49 +432,59 @@ public class ScimClient {
                     adapter = getAdapter(aClass);
                     adapter.apply(resource);
 
+                    String resourceInfo = getResourceInfo(adapter);
+                    LOGGER.infof("Processing remote resource: %s", resourceInfo);
+
                     var mapping = adapter.getMapping();
                     if (mapping != null) {
                         adapter.apply(mapping);
                         if (adapter.entityExists()) {
-                            LOGGER.info("Valid mapping found, skipping");
+                            LOGGER.infof("Valid mapping found for %s, skipping", resourceInfo);
                             continue;
                         } else {
-                            LOGGER.info("Delete a dangling mapping");
+                            LOGGER.infof("Deleting dangling mapping for %s", resourceInfo);
                             adapter.deleteMapping();
                         }
                     }
 
                     var mapped = adapter.tryToMap();
                     if (mapped) {
-                        LOGGER.info("Matched");
+                        LOGGER.infof("Matched local resource for %s", resourceInfo);
                         adapter.saveMapping();
                     } else {
                         switch (this.model.get("sync-import-action")) {
                             case "CREATE_LOCAL":
-                                LOGGER.info("Create local resource");
+                                LOGGER.infof("Creating local resource for %s", resourceInfo);
                                 try {
                                     adapter.createEntity();
                                     adapter.saveMapping();
-                                    syncRes.increaseAdded();
+                                    trackAdded(syncRes, adapter, resourceInfo);
                                 } catch (Exception e) {
-                                    LOGGER.error(e);
+                                    LOGGER.errorf("Failed to create local resource for %s: %s", resourceInfo, e.getMessage());
+                                    trackFailed(syncRes, adapter, resourceInfo + " (create failed: " + e.getMessage() + ")");
                                 }
                                 break;
                             case "DELETE_REMOTE":
-                                LOGGER.info("Delete remote resource");
-                                scimRequestBuilder
-                                    .delete(genScimUrl(adapter.getSCIMEndpoint(),
-                                                       resource.getId().get()),
-                                                       adapter.getResourceClass())
-                                    .sendRequest();
-                                syncRes.increaseRemoved();
+                                LOGGER.infof("Deleting remote resource for %s", resourceInfo);
+                                try {
+                                    scimRequestBuilder
+                                        .delete(genScimUrl(adapter.getSCIMEndpoint(),
+                                                           resource.getId().get()),
+                                                           adapter.getResourceClass())
+                                        .sendRequest();
+                                    trackRemoved(syncRes, adapter, resourceInfo);
+                                } catch (Exception e) {
+                                    LOGGER.errorf("Failed to delete remote resource for %s: %s", resourceInfo, e.getMessage());
+                                    trackFailed(syncRes, adapter, resourceInfo + " (delete failed: " + e.getMessage() + ")");
+                                }
                                 break;
                         }
                     }
                 } catch (Exception e) {
-                    LOGGER.error(e);
+                    String resourceInfo = adapter != null ? getResourceInfo(adapter) : "unknown";
+                    LOGGER.errorf("Failed to process resource %s: %s", resourceInfo, e.getMessage());
                     e.printStackTrace();
-                    syncRes.increaseFailed();
+                    trackFailed(syncRes, adapter, resourceInfo + " (processing failed: " + e.getMessage() + ")");
                 }
             }
         } catch (ResponseException e) {
@@ -317,15 +494,100 @@ public class ScimClient {
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void sync(Class<A> aClass,
             SynchronizationResult syncRes) {
+        LOGGER.debugf("Starting sync for %s", aClass.getSimpleName());
         if (this.model.get("sync-import", false)) {
             this.importResources(aClass, syncRes);
         }
         if (this.model.get("sync-refresh", false)) {
             this.refreshResources(aClass, syncRes);
         }
+        LOGGER.debugf("Sync completed for %s", aClass.getSimpleName());
     }
 
     public void close() {
         scimRequestBuilder.close();
     }
+
+    private <M extends RoleMapperModel, A extends Adapter<M, ?>> String getResourceInfo(A adapter) {
+        if (adapter instanceof UserAdapter userAdapter) {
+            String username = userAdapter.getUsername();
+            String email = userAdapter.getEmail();
+            return String.format("User(username=%s, email=%s)", username, email);
+        } else if (adapter instanceof GroupAdapter groupAdapter) {
+            String displayName = groupAdapter.getDisplayName();
+            return String.format("Group(name=%s, id=%s)", displayName, adapter.getId());
+        }
+        return String.format("Resource(id=%s)", adapter.getId());
+    }
+
+    private <M extends RoleMapperModel, A extends Adapter<M, ?>> void trackAdded(SynchronizationResult syncRes, A adapter, String resourceInfo) {
+        if (syncRes instanceof ScimSynchronizationResult scimResult) {
+            if (adapter instanceof UserAdapter) {
+                scimResult.addAddedUser(resourceInfo);
+            } else if (adapter instanceof GroupAdapter) {
+                scimResult.addAddedGroup(resourceInfo);
+            } else {
+                syncRes.increaseAdded();
+            }
+        } else {
+            syncRes.increaseAdded();
+        }
+    }
+
+    private <M extends RoleMapperModel, A extends Adapter<M, ?>> void trackUpdated(SynchronizationResult syncRes, A adapter, String resourceInfo) {
+        if (syncRes instanceof ScimSynchronizationResult scimResult) {
+            if (adapter instanceof UserAdapter) {
+                scimResult.addUpdatedUser(resourceInfo);
+            } else if (adapter instanceof GroupAdapter) {
+                scimResult.addUpdatedGroup(resourceInfo);
+            } else {
+                syncRes.increaseUpdated();
+            }
+        } else {
+            syncRes.increaseUpdated();
+        }
+    }
+
+    private <M extends RoleMapperModel, A extends Adapter<M, ?>> void trackRemoved(SynchronizationResult syncRes, A adapter, String resourceInfo) {
+        if (syncRes instanceof ScimSynchronizationResult scimResult) {
+            if (adapter instanceof UserAdapter) {
+                scimResult.addRemovedUser(resourceInfo);
+            } else if (adapter instanceof GroupAdapter) {
+                scimResult.addRemovedGroup(resourceInfo);
+            } else {
+                syncRes.increaseRemoved();
+            }
+        } else {
+            syncRes.increaseRemoved();
+        }
+    }
+
+    private <M extends RoleMapperModel, A extends Adapter<M, ?>> void trackMapped(SynchronizationResult syncRes, A adapter, String resourceInfo) {
+        if (syncRes instanceof ScimSynchronizationResult scimResult) {
+            if (adapter instanceof UserAdapter) {
+                scimResult.addMappedUser(resourceInfo);
+            } else if (adapter instanceof GroupAdapter) {
+                scimResult.addMappedGroup(resourceInfo);
+            } else {
+                syncRes.increaseUpdated();
+            }
+        } else {
+            syncRes.increaseUpdated();
+        }
+    }
+
+    private <M extends RoleMapperModel, A extends Adapter<M, ?>> void trackFailed(SynchronizationResult syncRes, A adapter, String resourceInfo) {
+        if (syncRes instanceof ScimSynchronizationResult scimResult) {
+            if (adapter instanceof UserAdapter) {
+                scimResult.addFailedUser(resourceInfo);
+            } else if (adapter instanceof GroupAdapter) {
+                scimResult.addFailedGroup(resourceInfo);
+            } else {
+                syncRes.increaseFailed();
+            }
+        } else {
+            syncRes.increaseFailed();
+        }
+    }
+
 }
