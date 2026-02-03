@@ -263,7 +263,7 @@ public class UserAdapter extends Adapter<UserModel, User> {
         var emails = new ArrayList<Email>();
         if (email != null) {
             emails.add(
-                Email.builder().value(getEmail()).type('work').primary(true).build());
+                Email.builder().value(getEmail()).type("work").primary(true).build());
         }
         PatchBuilder<User> patchBuilder;
         patchBuilder = scimRequestBuilder.patch(url, User.class);
