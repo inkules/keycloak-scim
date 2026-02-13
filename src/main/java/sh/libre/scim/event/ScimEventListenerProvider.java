@@ -49,6 +49,9 @@ public class ScimEventListenerProvider implements EventListenerProvider {
             var user = getUser(event.getUserId());
             dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter.class, user));
         }
+        // Delete events arrive after the user is already removed in Keycloak, so we cannot
+        // fetch the user or rely on email verification. Delete directly by ID to avoid NPEs
+        // and make sure the remote SCIM resource is cleaned up.
         if (event.getType() == EventType.DELETE_ACCOUNT) {
             dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.delete(UserAdapter.class, event.getUserId()));
         }
@@ -83,10 +86,9 @@ public class ScimEventListenerProvider implements EventListenerProvider {
                 }
             }
             if (event.getOperationType() == OperationType.DELETE) {
-                var user = getUser(userId);
-                if (user.isEmailVerified()) {
-                    dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.delete(UserAdapter.class, userId));
-                }
+                // At this point the user may already be removed; delete purely by ID to avoid
+                // null dereference and ensure propagation of the deletion.
+                dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.delete(UserAdapter.class, userId));
             }
         }
         if (event.getResourceType() == ResourceType.GROUP) {
