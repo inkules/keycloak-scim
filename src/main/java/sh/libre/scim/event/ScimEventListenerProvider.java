@@ -53,6 +53,7 @@ public class ScimEventListenerProvider implements EventListenerProvider {
         // fetch the user or rely on email verification. Delete directly by ID to avoid NPEs
         // and make sure the remote SCIM resource is cleaned up.
         if (event.getType() == EventType.DELETE_ACCOUNT) {
+            LOGGER.infof("SCIM delete (user event) for %s", event.getUserId());
             dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.delete(UserAdapter.class, event.getUserId()));
         }
     }
@@ -88,6 +89,12 @@ public class ScimEventListenerProvider implements EventListenerProvider {
             if (event.getOperationType() == OperationType.DELETE) {
                 // At this point the user may already be removed; delete purely by ID to avoid
                 // null dereference and ensure propagation of the deletion.
+                var user = getUser(userId);
+                if (user == null) {
+                    LOGGER.warnf("SCIM delete (admin event) for %s: user already absent in Keycloak, deleting by ID", userId);
+                } else {
+                    LOGGER.infof("SCIM delete (admin event) for %s: user still present, emailVerified=%s", userId, user.isEmailVerified());
+                }
                 dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.delete(UserAdapter.class, userId));
             }
         }
