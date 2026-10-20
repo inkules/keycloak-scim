@@ -128,19 +128,28 @@ public class ScimClient {
         try {
             String listUrl = scimApplicationBaseUrl + "/" + endpoint;
             LOGGER.infof("Sending SCIM list request to URL: %s", listUrl);
-            ServerResponse<ListResponse<S>> pageResponse = scimRequestBuilder
-                .list(listUrl, resourceClass)
-                .get()
-                .sendRequest();
-            LOGGER.info("Received response for list request: status=" + pageResponse.getHttpStatus() + ", success=" + pageResponse.isSuccess());
-            if (pageResponse.isSuccess()) {
+            // atlassian caps pages at 100, so walk through all of them
+            long startIndex = 1;
+            while (true) {
+                ServerResponse<ListResponse<S>> pageResponse = scimRequestBuilder
+                    .list(listUrl, resourceClass)
+                    .startIndex(startIndex)
+                    .count(100)
+                    .get()
+                    .sendRequest();
+                if (!pageResponse.isSuccess()) {
+                    LOGGER.warnf("Failed to fetch resources: HTTP %d - %s", pageResponse.getHttpStatus(), pageResponse.getResponseBody());
+                    break;
+                }
                 ListResponse<S> page = pageResponse.getResource();
-                allResources.addAll(page.getListedResources());
-                LOGGER.infof("Fetched %d resources from response", allResources.size());
-                // Note: Assuming Databricks returns all resources in one page or we take the first page
-            } else {
-                LOGGER.warnf("Failed to fetch resources: HTTP %d - %s", pageResponse.getHttpStatus(), pageResponse.getResponseBody());
+                List<S> listed = page.getListedResources();
+                allResources.addAll(listed);
+                if (listed.isEmpty() || allResources.size() >= page.getTotalResults()) {
+                    break;
+                }
+                startIndex += listed.size();
             }
+            LOGGER.infof("Fetched %d resources from response", allResources.size());
         } catch (Exception e) {
             LOGGER.error("Failed to fetch resources", e);
             LOGGER.errorf("Failed to fetch resources: %s", e.getMessage());
@@ -167,7 +176,7 @@ public class ScimClient {
             }
             for (S resource : allResources) {
                 boolean match = false;
-                if (adapter instanceof UserAdapter && !targetEmail.isEmpty()) {
+                if (adapter instanceof UserAdapter && targetEmail != null && !targetEmail.isEmpty()) {
                     if (resource instanceof de.captaingoldfish.scim.sdk.common.resources.User user) {
                         var emails = user.getEmails();
                         if (emails != null) {
