@@ -51,11 +51,16 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
     public void apply(GroupModel group) {
         setId(group.getId());
         setDisplayName(group.getName());
-        this.members = session.users()
-                .getGroupMembersStream(session.getContext().getRealm(), group)
+        // atlassian has no nested groups, so pull in members of all subgroups too
+        this.members = withSubGroups(group)
+                .flatMap(g -> session.users().getGroupMembersStream(session.getContext().getRealm(), g))
                 .map(x -> x.getId())
                 .collect(Collectors.toSet());
         this.skip = StringUtils.equals(group.getFirstAttribute("scim-skip"), "true");
+    }
+
+    private static Stream<GroupModel> withSubGroups(GroupModel group) {
+        return Stream.concat(Stream.of(group), group.getSubGroupsStream().flatMap(GroupAdapter::withSubGroups));
     }
 
     @Override

@@ -2,6 +2,7 @@ package sh.libre.scim.event;
 
 import java.util.HashMap;
 import java.util.regex.*;
+import java.util.stream.Stream;
 
 import org.jboss.logging.Logger;
 import org.keycloak.events.Event;
@@ -75,7 +76,7 @@ public class ScimEventListenerProvider implements EventListenerProvider {
                 var user = getUser(userId);
                 if (user.isEmailVerified()) {
                     dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.create(UserAdapter.class, user));
-                    user.getGroupsStream().forEach(group -> {
+                    user.getGroupsStream().flatMap(this::withParents).distinct().forEach(group -> {
                         dispatcher.run(ScimDispatcher.SCOPE_GROUP, client -> client.replace(GroupAdapter.class, group));
                     });
                 }
@@ -118,8 +119,10 @@ public class ScimEventListenerProvider implements EventListenerProvider {
             var userId = matcher.group(1);
             var groupId = matcher.group(2);
             LOGGER.infof("%s %s from %s", event.getOperationType(), userId, groupId);
-            var group = getGroup(groupId);
-            dispatcher.run(ScimDispatcher.SCOPE_GROUP, client -> client.replace(GroupAdapter.class, group));
+            // parents inherit the members, so they need a refresh as well
+            withParents(getGroup(groupId)).forEach(group -> {
+                dispatcher.run(ScimDispatcher.SCOPE_GROUP, client -> client.replace(GroupAdapter.class, group));
+            });
             var user = getUser(userId);
             dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter.class, user));
         }
@@ -141,6 +144,10 @@ public class ScimEventListenerProvider implements EventListenerProvider {
 
     private UserModel getUser(String id) {
         return session.users().getUserById(session.getContext().getRealm(), id);
+    }
+
+    private Stream<GroupModel> withParents(GroupModel group) {
+        return Stream.iterate(group, g -> g != null, GroupModel::getParent);
     }
 
     private GroupModel getGroup(String id) {
